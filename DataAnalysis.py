@@ -36,7 +36,7 @@ class DataAnalysis:
 
     @staticmethod
     def get_activities(df: pl.DataFrame, threshold=0, label="flow"):
-        activities = (
+        df = (
             df.with_columns(
                 # 1. Create a boolean column: True if flow is above the threshold
                 is_active=pl.col(label)
@@ -55,7 +55,9 @@ class DataAnalysis:
                 # Keep only the rows that are part of an activity
                 pl.col("is_active")
             )
-            .group_by("activity_id")
+        )
+        df_activity = (
+            df.group_by("activity_id")
             .agg(
                 # 4. Aggregate to find the start and end time of each activity
                 start_time=pl.col("date").min().dt.offset_by(by="-1s"),
@@ -67,9 +69,9 @@ class DataAnalysis:
                 duration=(pl.col("end_time") - pl.col("start_time")).dt.total_seconds()
             )
             .drop("activity_id")  # Clean up the output by dropping the helper column
-            .sort("start_time")  # Sort the results for a clean list
-        )
-        return activities
+            .sort("start_time")
+        )  # Sort the results for a clean list)
+        return df_activity
 
     @staticmethod
     def cluster_activities(
@@ -103,16 +105,20 @@ class DataAnalysis:
 
     @staticmethod
     def analysis_activities(
+        df: pl.DataFrame,
         activities: pl.DataFrame,
         duration_th=(1, 5),
         peak_th=1,
-        show=False
+        show=False,
     ) -> dict:
-        x = activities.filter(
+        to_filter = (
             (pl.col("duration").lt(duration_th[1]))
             & (pl.col("duration").gt(duration_th[0]))
             & (pl.col("peak").gt(peak_th))
-        ).with_columns(hour_day=pl.col("start_time").dt.hour())
+        )
+        x = activities.filter(to_filter).with_columns(
+            hour_day=pl.col("start_time").dt.hour()
+        )
         x_hour = x.group_by("hour_day").agg(count=pl.len()).sort(by="hour_day")
 
         out = {
@@ -120,15 +126,25 @@ class DataAnalysis:
             "percentage_amount": len(x) / len(activities) * 100,
             # "time_distribution": x_hour,
         }
+        print(out)
         if show:
+            fig, ax = plt.subplots()
+            x_hat = activities.filter(~to_filter)
+            mask = df.__deepcopy__()
+            for row in x_hat.iter_rows(named=True):
+                start, end = row["start_time"], row["end_time"]
+                mask = mask.with_columns(flow=pl.when((pl.col("date").gt(start)) & (pl.col("date").lt(end))).then(0).otherwise(pl.col("flow")))
+            mask.to_pandas().set_index("date", drop=True)["flow"].plot(ax=ax)
+
             fig, ax = plt.subplots()
             ax.bar(x_hour["hour_day"].to_list(), x_hour["count"].to_list())
             plt.show()
-        print(out)
         return out
 
     def run(self):
-        df = self.load_water(start=datetime.datetime(2025, 9, 1), end=datetime.datetime.now())
+        df = self.load_water(
+            start=datetime.datetime(2025, 9, 1), end=datetime.datetime.now()
+        )
         activities = self.get_activities(df)
         out = {}
         durations = [
@@ -140,7 +156,9 @@ class DataAnalysis:
             (500, 1000),
         ]
         for duration_th in durations:
-            obj = self.analysis_activities(activities, duration_th=duration_th, show=False, peak_th=0)
+            obj = self.analysis_activities(
+                df, activities, duration_th=duration_th, show=True, peak_th=0
+            )
             out[duration_th] = obj
         print(out)
 
