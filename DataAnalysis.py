@@ -13,6 +13,17 @@ class DataAnalysis:
             self.users = db.get_collection("devices")
             self.water = db.get_collection("water-flow")
 
+        aggregate = [
+            {"$match": {"valve-state.description": "Fail"}},
+            {"$project": {"_id": 0, "device_id": "$device_id","date": "$date", "flow": "$water-flow.value"}},
+        ]
+        res = self.water.aggregate(aggregate)
+        df = pl.DataFrame(list(res)).sort(by="date")
+        print(df)
+        df.to_pandas().set_index("date")["flow"].plot()
+        plt.show()
+
+
     @staticmethod
     def plot_water(df: pl.DataFrame, label="flow"):
         fig, ax = plt.subplots()
@@ -28,7 +39,7 @@ class DataAnalysis:
     ):
         query = [
             {"$match": {"device_id": device_id, "date": {"$gte": start, "$lt": end}}},
-            {"$project": {"_id": 0, "date": "$date", "flow": "$water-flow.value", "temp": "$water-temperature.value"}},
+            {"$project": {"_id": 0, "date": "$date", "flow": "$water-flow.value"}},
         ]
         df = self.water.aggregate(query)
         df = pl.DataFrame(list(df))
@@ -135,7 +146,11 @@ class DataAnalysis:
             mask = df.__deepcopy__()
             for row in x_hat.iter_rows(named=True):
                 start, end = row["start_time"], row["end_time"]
-                mask = mask.with_columns(flow=pl.when((pl.col("date").gt(start)) & (pl.col("date").lt(end))).then(0).otherwise(pl.col("flow")))
+                mask = mask.with_columns(
+                    flow=pl.when((pl.col("date").gt(start)) & (pl.col("date").lt(end)))
+                    .then(0)
+                    .otherwise(pl.col("flow"))
+                )
             mask.to_pandas().set_index("date", drop=True)["flow"].plot(ax=ax)
 
             fig, ax = plt.subplots()
@@ -166,4 +181,4 @@ class DataAnalysis:
 
 
 if __name__ == "__main__":
-    DataAnalysis().run()
+    DataAnalysis()
