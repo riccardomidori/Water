@@ -28,10 +28,12 @@ class DataAnalysis:
     ):
         query = [
             {"$match": {"device_id": device_id, "date": {"$gte": start, "$lt": end}}},
-            {"$project": {"_id": 0, "date": "$date", "flow": "$water-flow.value"}},
+            {"$project": {"_id": 0, "date": "$date", "flow": "$water-flow.value", "temp": "$water-temperature.value"}},
         ]
         df = self.water.aggregate(query)
         df = pl.DataFrame(list(df))
+        df.to_pandas().set_index("date", drop=True).plot(subplots=True)
+        plt.show()
         return df
 
     @staticmethod

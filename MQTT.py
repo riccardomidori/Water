@@ -1,11 +1,9 @@
 import datetime
 import time
 
+import paho.mqtt.client
 import pandas as pd
-from pathlib import Path
-
 import pymongo
-from matplotlib import pyplot as plt
 import seaborn as sns
 
 import ssl
@@ -17,7 +15,7 @@ from config.Logger import XMLLogger
 class MidoriMQTTClient:
     def __init__(
         self,
-        device_id: str = "EWCS30065",
+        devices=None,
         cert_path: str = "data/ELTEK/56f7177dbf29c6261aab663e3ed59754cd3b769a0a90f1a0989353ebece5fa5c-certificate.pem.crt",
         key_path: str = "data/ELTEK/56f7177dbf29c6261aab663e3ed59754cd3b769a0a90f1a0989353ebece5fa5c-private.pem.key",
         ca_path: str = "data/ELTEK/AmazonRootCA1.pem",
@@ -26,31 +24,32 @@ class MidoriMQTTClient:
         frequency=1,
         duration=1,
     ):
+        if devices is None:
+            devices = ["EWCS30065"]
+        self.devices = devices
         self.duration = duration
         self.frequency = frequency
-        self.device_id = device_id
-        self.set_topic = f"{device_id}/setdatastream"
-        self.out_topic = f"{device_id}/out/datastream"
 
         with pymongo.MongoClient() as c:
             db = c.get_database("eltek")
-            self.devices = db.get_collection("devices")
+            self.devices_collection = db.get_collection("devices")
             self.water_flow = db.get_collection("water-flow")
 
-        device = {
-            "device_id": device_id,
-            "config": {
-                "frequency": frequency,
-                "duration": duration,
+        for device_id in devices:
+            device = {
+                "device_id": device_id,
+                "config": {
+                    "frequency": frequency,
+                    "duration": duration,
+                }
             }
-        }
 
-        check = self.devices.find(device).count()
-        if check == 0:
-            print(f"Inserting {device}")
-            self.devices.insert_one(device)
+            check = self.devices_collection.count_documents(device)
+            if check == 0:
+                print(f"Inserting {device}")
+                self.devices_collection.insert_one(device)
 
-        self.client = mqtt.Client()
+        self.client = mqtt.Client(client_id="mqtt-explorer-8ce1cee7")
 
         # TLS/SSL configuration
         self.client.tls_set(
@@ -63,26 +62,36 @@ class MidoriMQTTClient:
 
         self.client.on_connect = self.on_connect
         self.client.on_message = self.on_message
+        self.client.on_disconnect = self.on_disconnect
 
         self.host = host
         self.port = port
 
-        self.logger = XMLLogger(name=f"mqtt-logger-{device_id}",
+        self.logger = XMLLogger(name=f"mqtt-logger",
                                 log_file="mqtt.log",
                                 path_to_log="log/Eltek/").logger
+
+    def on_disconnect(self, client, userdata, rc):
+        self.logger.warning(f"Disconnected with result code {rc}")
+        time.sleep(0.2)
 
     def on_connect(self, client, userdata, flags, rc):
         if rc == 0:
             self.logger.info("Connected to MQTT broker")
-            self.client.subscribe(self.out_topic)
-            self.logger.info(f"Subscribed to: {self.out_topic}")
+            topics = [
+                (f"{device_id}/out/datastream", 0)
+                for device_id in self.devices
+            ]
+            self.client.subscribe(topics)
+            self.logger.info(f"Subscribed to: {topics}")
+            time.sleep(0.1)
         else:
             self.logger.error(f"Failed to connect. Code: {rc}")
 
     def on_message(self, client, userdata, msg):
-        self.logger.debug(f"Received message from {msg.topic}")
         try:
             payload = json.loads(msg.payload.decode("utf-8"))
+            self.logger.debug(f"Received {payload} from {msg.topic}")
             obj = {
                 "device_id": payload["UniqueName"],
                 "date": datetime.datetime.fromtimestamp(payload["Timestamp"]["epoch"] / 1000),
@@ -109,8 +118,11 @@ class MidoriMQTTClient:
 
     def send_set_datastream(self):
         payload = {"frequency": self.frequency, "duration": self.duration}
-        self.logger.debug(f"Sending to {self.set_topic}: {payload}")
-        self.client.publish(self.set_topic, json.dumps(payload))
+        for device_id in self.devices:
+            topic = f"{device_id}/setdatastream"
+            self.logger.debug(f"Sending to {topic}: {payload}")
+            self.client.publish(topic, json.dumps(payload))
+            time.sleep(0.1)
 
 
 class WaterSensor:
@@ -119,8 +131,11 @@ class WaterSensor:
 
     @staticmethod
     def connect():
+        # EWCS3A077 not working
+        device_list = ["EWCS30065", "EWCS30156", "EWCS30154", "EWCS30143", "EWCS30144"]
+
         client = MidoriMQTTClient(
-            device_id="EWCS30065",
+            devices=device_list,
             frequency=1,
             duration=-1
         )
