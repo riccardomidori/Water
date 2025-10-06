@@ -13,17 +13,6 @@ class DataAnalysis:
             self.users = db.get_collection("devices")
             self.water = db.get_collection("water-flow")
 
-        aggregate = [
-            {"$match": {"valve-state.description": "Fail"}},
-            {"$project": {"_id": 0, "device_id": "$device_id","date": "$date", "flow": "$water-flow.value"}},
-        ]
-        res = self.water.aggregate(aggregate)
-        df = pl.DataFrame(list(res)).sort(by="date")
-        print(df)
-        df.to_pandas().set_index("date")["flow"].plot()
-        plt.show()
-
-
     @staticmethod
     def plot_water(df: pl.DataFrame, label="flow"):
         fig, ax = plt.subplots()
@@ -160,9 +149,10 @@ class DataAnalysis:
 
     def run(self):
         df = self.load_water(
+            device_id="EWCS30143",
             start=datetime.datetime(2025, 9, 1), end=datetime.datetime.now()
         )
-        activities = self.get_activities(df)
+        activities = self.get_activities(df, threshold=1)
         out = {}
         durations = [
             (0, 5),
@@ -181,4 +171,4 @@ class DataAnalysis:
 
 
 if __name__ == "__main__":
-    DataAnalysis()
+    DataAnalysis().run()

@@ -49,7 +49,7 @@ class MidoriMQTTClient:
                 print(f"Inserting {device}")
                 self.devices_collection.insert_one(device)
 
-        self.client = mqtt.Client(client_id="mqtt-explorer-8ce1cee7")
+        self.client = mqtt.Client(client_id="midori-mqtt")
 
         # TLS/SSL configuration
         self.client.tls_set(
