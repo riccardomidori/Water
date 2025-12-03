@@ -3,7 +3,11 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import pymongo
 import polars as pl
-
+import numpy as np
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+import matplotlib.cm as cm
+import matplotlib
 
 class DataAnalysis:
     def __init__(self):
@@ -12,6 +16,23 @@ class DataAnalysis:
             db = c.get_database("eltek")
             self.users = db.get_collection("devices")
             self.water = db.get_collection("water-flow")
+
+    @staticmethod
+    def get_N_colors(n, cmap_name="viridis"):
+        """
+        Returns a list of N distinct colors (RGBA tuples) from a Matplotlib colormap.
+        """
+        # 1. Get the Colormap object
+        cmap = matplotlib.colormaps[cmap_name]
+
+        # 2. Generate N equally spaced values between 0 and 1
+        # These values represent points along the colormap
+        color_indices = np.linspace(0, 1, n)
+
+        # 3. Call the Colormap object with the indices to get the RGBA colors
+        colors = cmap(color_indices)
+
+        return colors.tolist()
 
     @staticmethod
     def plot_water(df: pl.DataFrame, label="flow"):
@@ -28,12 +49,18 @@ class DataAnalysis:
     ):
         query = [
             {"$match": {"device_id": device_id, "date": {"$gte": start, "$lt": end}}},
-            {"$project": {"_id": 0, "date": "$date", "flow": "$water-flow.value"}},
+            {
+                "$project": {
+                    "_id": 0,
+                    "date": "$date",
+                    "flow": "$water-flow.value",
+                    "water_temp": "$water-temperature.value",
+                    "ambient_temp": "$ambient-temperature.value",
+                }
+            },
         ]
         df = self.water.aggregate(query)
         df = pl.DataFrame(list(df))
-        df.to_pandas().set_index("date", drop=True).plot(subplots=True)
-        plt.show()
         return df
 
     @staticmethod
@@ -41,8 +68,8 @@ class DataAnalysis:
         df = (
             df.with_columns(
                 # 1. Create a boolean column: True if flow is above the threshold
-                is_active=pl.col(label)
-                > threshold
+                is_active=pl.col(label) > threshold,
+                temp_delta=(pl.col("water_temp") - pl.col("ambient_temp")),
             )
             .with_columns(
                 # 2. Identify start of activities: True if `is_active` is True and the previous value was False
@@ -58,51 +85,106 @@ class DataAnalysis:
                 pl.col("is_active")
             )
         )
-        df_activity = (
+        df_features = (
             df.group_by("activity_id")
             .agg(
-                # 4. Aggregate to find the start and end time of each activity
-                start_time=pl.col("date").min().dt.offset_by(by="-1s"),
-                end_time=pl.col("date").max().dt.offset_by("1s"),
-                peak=pl.col("flow").max(),
-                consumption=pl.col("flow").sum(),
+                [
+                    # Timing
+                    pl.col("date").min().alias("start_time"),
+                    pl.col("date").max().alias("end_time"),
+                    # Flow characteristics
+                    pl.col(label).sum().alias("total_volume"),
+                    pl.col(label).max().alias("peak_flow"),
+                    pl.col(label).mean().alias("avg_flow"),
+                    pl.col(label)
+                    .std()
+                    .fill_null(0)
+                    .alias("flow_stability"),  # 0 std = very stable
+                    # Temperature characteristics (Crucial for appliance detection)
+                    pl.col("temp_delta").max().alias("max_temp_delta"),
+                    pl.col("temp_delta").mean().alias("avg_temp_delta"),
+                ]
             )
             .with_columns(
                 duration=(pl.col("end_time") - pl.col("start_time")).dt.total_seconds()
             )
-            .drop("activity_id")  # Clean up the output by dropping the helper column
             .sort("start_time")
-        )  # Sort the results for a clean list)
-        return df_activity
-
-    @staticmethod
-    def cluster_activities(
-        activities: pl.DataFrame, feature1="consumption", feature2="peak"
-    ):
-        fig, ax = plt.subplots()
-        activities.to_pandas()[[feature1, feature2]].plot(
-            ax=ax, kind="scatter", x=feature1, y=feature2
         )
-        plt.show()
+        return df_features
 
     @staticmethod
+    def cluster_activities(activities_df: pl.DataFrame, n_clusters=5):
+        """
+        Applies K-Means to categorize water events.
+        """
+        # Select features for clustering
+        features = [
+            "duration",
+            "total_volume",
+            "peak_flow",
+            # "avg_temp_delta",
+            "flow_stability",
+        ]
+
+        # Convert to numpy for sklearn
+        X = activities_df.select(features).to_numpy()
+
+        # Normalize data (Critical: duration is in seconds, volume in liters - scales differ)
+        scaler = StandardScaler()
+        x_scaled = scaler.fit_transform(X)
+
+        # Cluster
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+        labels = kmeans.fit_predict(x_scaled)
+
+        # Attach labels back to Polars DataFrame
+        return activities_df.with_columns(pl.Series("usage_cluster", labels))
+
+    @staticmethod
+    def detect_micro_leaks(df: pl.DataFrame, window_minutes=60):
+        """
+        Detects if the minimum flow never drops to zero within a sliding window.
+        """
+        # Calculate rolling min over the window
+        # Note: '1i' in Polars depends on index, if index is time, use dynamic rolling
+        leak_df = (
+            df.sort("date")
+            .set_sorted("date")
+            .with_columns(
+                rolling_min_flow=pl.col("flow").rolling_min_by(
+                    "date", f"{window_minutes}m"
+                )
+            )
+        )
+
+        # If the rolling minimum is > 0 for a sustained period, you have a leak
+        leaks = leak_df.filter(pl.col("rolling_min_flow") > 0.05)  # 0.05 lt/m buffer
+
+        return leaks
+
     def plot_activities(
+            self,
         df: pl.DataFrame,
         activities: pl.DataFrame,
         label="flow",
         duration_th=(1, 5),
         peak_th=1,
     ):
-        x = activities.filter(
-            (pl.col("duration").lt(duration_th[1]))
-            & (pl.col("duration").gt(duration_th[0]))
-            & (pl.col("peak").gt(peak_th))
-        )
+        n = len(activities["usage_cluster"].unique())
+        colors = self.get_N_colors(n)
+        # x = activities.filter(
+        #     (pl.col("duration").lt(duration_th[1]))
+        #     & (pl.col("duration").gt(duration_th[0]))
+        #     & (pl.col("peak").gt(peak_th))
+        # )
         fig, ax = plt.subplots()
         df.to_pandas().set_index("date", drop=True)[label].plot(ax=ax)
-        for row in x.iter_rows(named=True):
-            start, end = row["start_time"], row["end_time"]
-            ax.axvspan(start, end, color=(1, 0, 0, 0.3))
+        clusters = activities["usage_cluster"].unique()
+        for i, c in enumerate(clusters):
+            x = activities.filter(pl.col("usage_cluster").eq(c))
+            for row in x.iter_rows(named=True):
+                start, end = row["start_time"], row["end_time"]
+                ax.axvspan(start, end, color=colors[i], alpha=0.3)
         plt.show()
 
     @staticmethod
@@ -149,25 +231,19 @@ class DataAnalysis:
 
     def run(self):
         df = self.load_water(
-            device_id="EWCS30143",
-            start=datetime.datetime(2025, 9, 1), end=datetime.datetime.now()
+            device_id="EWCS30065",
+            start=datetime.datetime(2025, 9, 10),
+            end=datetime.datetime(2025, 9, 20),
         )
+        print(df)
         activities = self.get_activities(df, threshold=1)
-        out = {}
-        durations = [
-            (0, 5),
-            (5, 10),
-            (10, 15),
-            (15, 20),
-            (20, 500),
-            (500, 1000),
-        ]
-        for duration_th in durations:
-            obj = self.analysis_activities(
-                df, activities, duration_th=duration_th, show=True, peak_th=0
-            )
-            out[duration_th] = obj
-        print(out)
+        clustered = self.cluster_activities(activities, 5)
+        leaks = self.detect_micro_leaks(df, window_minutes=10)
+        print(activities)
+        print(clustered)
+        self.plot_activities(df, clustered)
+        print(leaks)
+        self.plot_water(df)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,14 @@
+[project]
+name = "eltek"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12.11"
+dependencies = [
+    "numpy>=2.3.5",
+    "polars>=1.35.2",
+    "pyarrow>=22.0.0",
+    "pymongo==3.11.3",
+    "scikit-learn>=1.7.2",
+    "seaborn>=0.13.2",
+]
