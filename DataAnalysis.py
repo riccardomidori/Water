@@ -6,8 +6,8 @@ import polars as pl
 import numpy as np
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
-import matplotlib.cm as cm
 import matplotlib
+
 
 class DataAnalysis:
     def __init__(self):
@@ -167,24 +167,32 @@ class DataAnalysis:
         df: pl.DataFrame,
         activities: pl.DataFrame,
         label="flow",
-        duration_th=(1, 5),
+        duration_th=(1, 500),
         peak_th=1,
+        is_cluster=True
     ):
-        n = len(activities["usage_cluster"].unique())
-        colors = self.get_N_colors(n)
-        # x = activities.filter(
-        #     (pl.col("duration").lt(duration_th[1]))
-        #     & (pl.col("duration").gt(duration_th[0]))
-        #     & (pl.col("peak").gt(peak_th))
-        # )
         fig, ax = plt.subplots()
         df.to_pandas().set_index("date", drop=True)[label].plot(ax=ax)
-        clusters = activities["usage_cluster"].unique()
-        for i, c in enumerate(clusters):
-            x = activities.filter(pl.col("usage_cluster").eq(c))
+
+        if is_cluster:
+            n = len(activities["usage_cluster"].unique())
+            colors = self.get_N_colors(n)
+            clusters = activities["usage_cluster"].unique()
+            for i, c in enumerate(clusters):
+                x = activities.filter(pl.col("usage_cluster").eq(c))
+                for row in x.iter_rows(named=True):
+                    start, end = row["start_time"], row["end_time"]
+                    ax.axvspan(start, end, color=colors[i], alpha=0.3)
+        else:
+            x = activities.filter(
+                (pl.col("duration").lt(duration_th[1]))
+                & (pl.col("duration").gt(duration_th[0]))
+                & (pl.col("peak_flow").gt(peak_th))
+            )
             for row in x.iter_rows(named=True):
                 start, end = row["start_time"], row["end_time"]
-                ax.axvspan(start, end, color=colors[i], alpha=0.3)
+                ax.axvspan(start, end, color=(1, 0, 0, 0.3))
+
         plt.show()
 
     @staticmethod
@@ -229,21 +237,99 @@ class DataAnalysis:
             plt.show()
         return out
 
+
+    @staticmethod
+    def describe_clusters(activities: pl.DataFrame, cluster_col="usage_cluster") -> tuple[pl.DataFrame, dict]:
+        """
+        Analyzes clusters and assigns human-readable labels based on water usage patterns.
+        Returns:
+            1. summary_df: Statistical summary of each cluster.
+            2. label_map: A dictionary {cluster_id: "Description"}
+        """
+
+        # 1. Calculate the "Centroids" (Average behavior per cluster)
+        summary = (
+            activities.group_by(cluster_col)
+            .agg(
+                count=pl.len(),
+                avg_duration=pl.col("duration").mean(),
+                avg_volume=pl.col("total_volume").mean(),
+                avg_peak=pl.col("peak_flow").mean(),
+                avg_temp_delta=(
+                    pl.col("avg_temp_delta").mean()
+                    if "avg_temp_delta" in activities.columns else pl.lit(0)
+                ),
+                avg_flow_stability=(
+                    pl.col("flow_stability").mean()
+                    if "flow_stability" in activities.columns else pl.lit(0)
+                )
+            )
+            .sort(cluster_col)
+        )
+
+        # 2. Heuristic Logic to name the clusters
+        # We iterate over the summary because the number of clusters is small (e.g., < 20)
+        label_map = {}
+
+        for row in summary.iter_rows(named=True):
+            cid = row[cluster_col]
+            dur = row["avg_duration"]  # seconds
+            vol = row["avg_volume"]  # liters
+            temp = row["avg_temp_delta"]  # degrees C diff
+            peak = row["avg_peak"]  # liters/min
+
+            # --- Logic Tree ---
+
+            # High Temperature Events
+            if temp > 5.0:
+                if vol > 25 and dur > 120:
+                    desc = "Shower / Bath"
+                elif vol > 10:
+                    desc = "Hot Water Wash (Dishes/Face)"
+                else:
+                    desc = "Short Hot Tap Usage"
+
+            # Cold/Ambient Temperature Events
+            else:
+                if vol > 30 and dur > 300:
+                    desc = "Irrigation / Hose Usage"
+                elif 4 <= vol <= 12 and peak > 5:
+                    # Toilets usually dump 6L-9L very quickly (high peak)
+                    desc = "Toilet Flush"
+                elif vol > 15 and dur > 600:
+                    # Washing machines/Dishwashers often have long durations with low avg temp (if cold fill)
+                    # Note: This is tricky as machines pulse water.
+                    desc = "Appliance Cycle (Cold Fill)"
+                elif vol < 2 and dur < 30:
+                    desc = "Quick Tap (Glass of Water/Hands)"
+                else:
+                    desc = f"General Cold Usage (Vol: {vol:.1f}L)"
+
+            label_map[cid] = desc
+        print(label_map)
+        # 3. Attach the inferred label back to the summary for easy reading
+        summary = summary.with_columns(
+            pl.col(cluster_col).cast(pl.String).replace(label_map).alias("inferred_category")
+        )
+
+        return summary, label_map
+
     def run(self):
         df = self.load_water(
             device_id="EWCS30065",
             start=datetime.datetime(2025, 9, 10),
             end=datetime.datetime(2025, 9, 20),
         )
+        self.plot_water(df)
         print(df)
         activities = self.get_activities(df, threshold=1)
+        self.plot_activities(df, activities, is_cluster=False)
         clustered = self.cluster_activities(activities, 5)
         leaks = self.detect_micro_leaks(df, window_minutes=10)
-        print(activities)
-        print(clustered)
+        summary, label_map = self.describe_clusters(clustered)
+        print(summary)
+        print(label_map)
         self.plot_activities(df, clustered)
-        print(leaks)
-        self.plot_water(df)
 
 
 if __name__ == "__main__":
