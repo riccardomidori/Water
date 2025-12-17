@@ -98,6 +98,7 @@ class MidoriMQTTClient:
                 "water-flow": payload["WaterFlow"],
                 "water-temperature": payload["WaterTemperature"],
                 "water-volume": payload["Volume"],
+                "water-pressure": payload["WaterPressure"],
                 "ambient-temperature": payload["AmbientTemperature"],
                 "volume": payload["Volume"],
                 "valve-state": payload["ValveState"]

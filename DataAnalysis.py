@@ -1,9 +1,12 @@
 import datetime
+from typing import Tuple, Dict, Any
+
 import seaborn as sns
 import matplotlib.pyplot as plt
 import pymongo
 import polars as pl
 import numpy as np
+from polars import DataFrame
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 import matplotlib
@@ -64,6 +67,109 @@ class DataAnalysis:
         return df
 
     @staticmethod
+    def plot_actual_vs_benchmark(summary_df):
+        """
+        Compares observed cluster frequency vs Italian Averages.
+        """
+        # 1. Prepare Data
+        # Calculate percentage of total events
+        total_events = summary_df["count"].sum()
+
+        df_plot = summary_df.select(
+            [
+                pl.col("inferred_category").alias("Category"),
+                (pl.col("count") / total_events * 100).alias("Actual (%)"),
+            ]
+        ).to_pandas()
+
+        # 2. Define Italian Benchmarks (Approximate)
+        # We map your detailed labels to generic categories
+        benchmarks = {
+            "Short Usage": 65,  # Taps/Hands
+            "Toilet": 18,
+            "Appliance": 14,  # Washing Machine pulses
+            "Shower": 2,
+            "Irrigation": 0.5,
+            "Leak": 0,
+        }
+
+        # 3. Map your categories to benchmark keys for comparison
+        # (Simple string matching logic)
+        df_plot["Benchmark (%)"] = df_plot["Category"].apply(
+            lambda x: next((v for k, v in benchmarks.items() if k in x), 0)
+        )
+
+        # 4. Melt for Side-by-Side Bar Chart
+        df_melted = df_plot.melt(
+            id_vars="Category",
+            value_vars=["Actual (%)", "Benchmark (%)"],
+            var_name="Type",
+            value_name="Percentage",
+        )
+
+        # 5. Plot
+        plt.figure(figsize=(10, 6))
+        sns.barplot(
+            data=df_melted, x="Category", y="Percentage", hue="Type", palette="muted"
+        )
+
+        plt.title("House Usage vs. Italian Average (Event Frequency)")
+        plt.ylabel("Frequency (% of Total Events)")
+        plt.xlabel("Usage Category")
+        plt.xticks(rotation=45)
+        plt.grid(axis="y", linestyle="--", alpha=0.5)
+        plt.tight_layout()
+        plt.show()
+
+    @staticmethod
+    def plot_cluster_physics(summary_df):
+        """
+        Plots Clusters based on Volume vs Duration, sized by Frequency.
+        Expects summary_df to have columns:
+        ['inferred_category', 'avg_duration', 'avg_volume', 'count']
+        """
+        # Convert to Pandas for plotting
+        data = summary_df.to_pandas()
+
+        plt.figure(figsize=(12, 8))
+
+        # Create Scatter Plot
+        # Size range (s) scales the bubbles to be visible
+        sns.scatterplot(
+            data=data,
+            x="avg_duration",
+            y="avg_volume",
+            size="count",
+            hue="inferred_category",
+            sizes=(100, 2000),  # Min and Max bubble size
+            alpha=0.7,
+            palette="viridis",
+        )
+
+        # Add Reference Zones (The "Physics" Boxes)
+        # 1. Toilet Zone (Low Duration, Fixed Volume)
+        plt.axhspan(
+            4, 12, xmin=0, xmax=0.2, color="red", alpha=0.1, label="Toilet Zone"
+        )
+
+        # 2. Shower Zone (High Duration, High Volume)
+        plt.axhspan(
+            30, 150, xmin=0.3, xmax=1.0, color="blue", alpha=0.1, label="Shower Zone"
+        )
+
+        # Log Scale is often better because Showers (100L) are huge compared to Taps (0.5L)
+        plt.xscale("log")
+        plt.yscale("log")
+
+        plt.title("Cluster Physics: Volume vs Duration (Size = Frequency)")
+        plt.xlabel("Average Duration (Seconds) - Log Scale")
+        plt.ylabel("Average Volume (Liters) - Log Scale")
+        plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
+        plt.grid(True, which="both", ls="--", alpha=0.4)
+        plt.tight_layout()
+        plt.show()
+
+    @staticmethod
     def get_activities(df: pl.DataFrame, threshold=0, label="flow"):
         df = (
             df.with_columns(
@@ -89,25 +195,42 @@ class DataAnalysis:
             df.group_by("activity_id")
             .agg(
                 [
-                    # Timing
                     pl.col("date").min().alias("start_time"),
                     pl.col("date").max().alias("end_time"),
-                    # Flow characteristics
-                    pl.col(label).sum().alias("total_volume"),
-                    pl.col(label).max().alias("peak_flow"),
-                    pl.col(label).mean().alias("avg_flow"),
+                    pl.col("flow").sum().alias("total_volume"),
+                    pl.col("flow").max().alias("peak_flow"),
+                    pl.col("flow").mean().alias("avg_flow"),
                     pl.col(label)
                     .std()
                     .fill_null(0)
                     .alias("flow_stability"),  # 0 std = very stable
                     # Temperature characteristics (Crucial for appliance detection)
-                    pl.col("temp_delta").max().alias("max_temp_delta"),
-                    pl.col("temp_delta").mean().alias("avg_temp_delta"),
+                    # 1. Flow Stability (Standard Deviation / Mean) = Coefficient of Variation
+                    # Low (< 0.1) = Machine/Shower. High (> 0.5) = Hand Usage.
+                    (pl.col("flow").std() / pl.col("flow").mean())
+                    .fill_null(0)
+                    .alias("flow_cv"),
+                    # 2. Ramp Up (How fast does it hit 80% of peak?)
+                    # This is a simplification. For true slope, we'd need regression,
+                    # but 'Time to Peak' is a good proxy.
+                    (
+                        pl.col("date")
+                        .filter(pl.col("flow") >= (pl.col("flow").max() * 0.8))
+                        .min()
+                        - pl.col("date").min()
+                    )
+                    .dt.total_seconds()
+                    .alias("time_to_peak"),
+                    # 3. Time Context (Crucial for Flow-Only)
+                    pl.col("date").min().dt.hour().alias("hour_of_day"),
                 ]
             )
             .with_columns(
                 duration=(pl.col("end_time") - pl.col("start_time")).dt.total_seconds()
             )
+            # Create a "Squareness" metric: Avg Flow / Peak Flow
+            # 1.0 = Perfect Square (Machine). 0.5 = Triangle (Tap).
+            .with_columns(shape_factor=(pl.col("avg_flow") / pl.col("peak_flow")))
             .sort("start_time")
         )
         return df_features
@@ -122,8 +245,8 @@ class DataAnalysis:
             "duration",
             "total_volume",
             "peak_flow",
-            # "avg_temp_delta",
-            "flow_stability",
+            "shape_factor",
+            # "flow_stability",
         ]
 
         # Convert to numpy for sklearn
@@ -163,13 +286,13 @@ class DataAnalysis:
         return leaks
 
     def plot_activities(
-            self,
+        self,
         df: pl.DataFrame,
         activities: pl.DataFrame,
         label="flow",
         duration_th=(1, 500),
         peak_th=1,
-        is_cluster=True
+        is_cluster=True,
     ):
         fig, ax = plt.subplots()
         df.to_pandas().set_index("date", drop=True)[label].plot(ax=ax)
@@ -237,9 +360,107 @@ class DataAnalysis:
             plt.show()
         return out
 
+    def describe_flow_clusters(
+        self, activities: pl.DataFrame, cluster_col="usage_cluster"
+    ) -> tuple[DataFrame, dict[Any, str]]:
+        """
+
+                Cluster Name,Frequency (% of Events),Avg Events / Day,Description (Italian Context)
+                Short Usage (Taps),60% - 75%,40 - 60,"Hand washing, brushing teeth, cooking, Bidet usage (specific to Italy, adds ~4-6 events/day)."
+                Toilet Flush,15% - 20%,12 - 15,~4-5 flushes per person/day.
+                Appliance Pulse,10% - 15%,10 - 20,"Warning: A single Washing Machine cycle creates ~15 distinct ""pulse"" events. Don't confuse these with Taps."
+                Shower / Bath,1% - 3%,2 - 3,Typically 0.7 showers per person/day.
+                Irrigation / Other,< 1%,0 - 1,Highly seasonal (Summer only).
+
+
+
+                Cluster Name,Volume (% of Total Liters),Typical Italian Benchmark
+                Shower / Bath,35% - 40%,40L - 60L per event (Italy has smaller tanks than US).
+                Toilet Flush,25% - 30%,6L - 9L (Old systems) or 3L/6L (New dual flush).
+                Washing Machine,10% - 15%,45L - 60L per cycle (Eco-modes are common).
+                Kitchen/Bath Taps,10% - 15%,Short bursts of 0.5L - 2L.
+                Dishwasher,4% - 6%,10L - 14L per cycle (Very efficient).
+                Leaks,Variable,"In older Italian houses, 5-10% leakage is common."
+
+
+                Cluster Label,Avg Peak Flow (L/m),Max Peak Flow (L/m),Most Common Hour
+                Short Tap Usage,4.6 L/m,14.1 L/m,20:00 (8 PM)
+                Appliance (Machine),6.7 L/m,14.1 L/m,07:00 (7 AM)
+                Toilet Flush,12.1 L/m,22.8 L/m,07:00 (7 AM)
+
+        """
+        summary = (
+            activities.group_by(cluster_col)
+            .agg(
+                avg_duration=pl.col("duration").mean(),
+                calc_volume=(pl.col("avg_flow").mean() * pl.col("duration").mean())
+                / 60,
+                avg_volume=pl.col("total_volume").mean(),
+                avg_shape=pl.col("shape_factor").mean(),  # 1=Square, 0.5=Spiky
+                avg_cv=pl.col("flow_cv").mean(),  # 0=Stable, 1=Chaotic
+                avg_peak=pl.col("peak_flow").mean(),
+                most_common_hour=pl.col("hour_of_day").mode().first(),
+                presence=pl.len() / len(activities),
+                count=pl.len(),
+            )
+            .sort(cluster_col)
+        )
+
+        label_map = {}
+
+        for row in summary.iter_rows(named=True):
+            cid = row[cluster_col]
+            dur = row["avg_duration"]
+            vol = row["avg_volume"]
+            shape = row["avg_shape"]  # Closer to 1 means "Square wave" (Machine)
+            cv = row["avg_cv"]  # Closer to 0 means "Stable"
+            hour = row["most_common_hour"]
+
+            # --- Logic Tree (Flow Only) ---
+
+            vol = row["calc_volume"]  # Recalculated Volume (Avg Flow * Duration / 60)
+            shape = row["avg_shape"]  # 1.0 = Square, 0.5 = Triangle
+
+            # 1. Shower / Bath (High Volume)
+            if vol > 10:
+                desc = "Shower / Bath"
+
+            # 2. Appliance (Machine Pulse)
+            # Appliances have very "Square" flow (Solenoid valve)
+            # Cluster 1 in your data was perfect here (Shape 0.92, Vol 4.2L)
+            elif shape > 0.85 and vol > 2.0:
+                desc = "Appliance (Machine)"
+
+            # 3. Toilet Flush (Mechanical Decay)
+            # Your data showed large 9-10L flushes with a non-square shape (0.57)
+            # This matches the "Tank Refill" curve.
+            elif 4.5 <= vol <= 12 and shape < 0.8:
+                desc = "Toilet Flush"
+
+            # 4. Short Taps (Dominant Category)
+            # Includes Hands, Face, Bidet, Kitchen Rinsing
+            elif vol < 4.5:
+                desc = "Short Tap Usage"
+
+            else:
+                desc = "Generic Usage"
+
+            label_map[cid] = desc
+        summary = summary.with_columns(
+            pl.col(cluster_col)
+            .cast(pl.String)
+            .replace(label_map)
+            .alias("inferred_category")
+        )
+        self.plot_cluster_physics(summary)
+        self.plot_actual_vs_benchmark(summary)
+
+        return summary, label_map
 
     @staticmethod
-    def describe_clusters(activities: pl.DataFrame, cluster_col="usage_cluster") -> tuple[pl.DataFrame, dict]:
+    def describe_clusters(
+        activities: pl.DataFrame, cluster_col="usage_cluster"
+    ) -> tuple[pl.DataFrame, dict]:
         """
         Analyzes clusters and assigns human-readable labels based on water usage patterns.
         Returns:
@@ -257,12 +478,14 @@ class DataAnalysis:
                 avg_peak=pl.col("peak_flow").mean(),
                 avg_temp_delta=(
                     pl.col("avg_temp_delta").mean()
-                    if "avg_temp_delta" in activities.columns else pl.lit(0)
+                    if "avg_temp_delta" in activities.columns
+                    else pl.lit(0)
                 ),
                 avg_flow_stability=(
                     pl.col("flow_stability").mean()
-                    if "flow_stability" in activities.columns else pl.lit(0)
-                )
+                    if "flow_stability" in activities.columns
+                    else pl.lit(0)
+                ),
             )
             .sort(cluster_col)
         )
@@ -309,27 +532,36 @@ class DataAnalysis:
         print(label_map)
         # 3. Attach the inferred label back to the summary for easy reading
         summary = summary.with_columns(
-            pl.col(cluster_col).cast(pl.String).replace(label_map).alias("inferred_category")
+            pl.col(cluster_col)
+            .cast(pl.String)
+            .replace(label_map)
+            .alias("inferred_category")
         )
 
         return summary, label_map
 
+    def load_users(self):
+        return self.users.find({}, {"_id": 0})
+
     def run(self):
-        df = self.load_water(
-            device_id="EWCS30065",
-            start=datetime.datetime(2025, 9, 10),
-            end=datetime.datetime(2025, 9, 20),
-        )
-        self.plot_water(df)
-        print(df)
-        activities = self.get_activities(df, threshold=1)
-        self.plot_activities(df, activities, is_cluster=False)
-        clustered = self.cluster_activities(activities, 5)
-        leaks = self.detect_micro_leaks(df, window_minutes=10)
-        summary, label_map = self.describe_clusters(clustered)
-        print(summary)
-        print(label_map)
-        self.plot_activities(df, clustered)
+        for c in self.load_users():
+            device = c["device_id"]
+            df = self.load_water(
+                device_id=device,
+                start=datetime.datetime(2025, 10, 1),
+                end=datetime.datetime(2025, 10, 30),
+            )
+            # self.plot_water(df)
+            print(df)
+            activities = self.get_activities(df, threshold=1)
+            print(activities)
+            # activities.write_csv(f"data/{device}_activities.csv")
+            # self.plot_activities(df, activities, is_cluster=False)
+            clustered = self.cluster_activities(activities, 6)
+            summary, label_map = self.describe_flow_clusters(clustered)
+            print(summary)
+            print(label_map)
+            self.plot_activities(df, clustered)
 
 
 if __name__ == "__main__":
