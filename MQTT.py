@@ -133,7 +133,17 @@ class WaterSensor:
     @staticmethod
     def connect():
         # EWCS3A077 not working
-        device_list = ["EWCS30065", "EWCS30156", "EWCS30154", "EWCS30143", "EWCS30144"]
+        device_list = ["EWCS30065",
+                       # "EWCS3A077",
+                       # "EWCA30143",
+                       "EWCA30192",
+                       "EWCA30196",
+                       "EWCA30197",
+                       # "EWCS30156",
+                       # "EWCS30154",
+                       # "EWCS30143",
+                       # "EWCS30144"
+                       ]
 
         client = MidoriMQTTClient(
             devices=device_list,
