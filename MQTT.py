@@ -98,6 +98,7 @@ class MidoriMQTTClient:
                 "water-flow": payload["WaterFlow"],
                 "water-temperature": payload["WaterTemperature"],
                 "water-volume": payload["Volume"],
+                "water-pressure": payload["WaterPressure"],
                 "ambient-temperature": payload["AmbientTemperature"],
                 "volume": payload["Volume"],
                 "valve-state": payload["ValveState"]
@@ -132,7 +133,17 @@ class WaterSensor:
     @staticmethod
     def connect():
         # EWCS3A077 not working
-        device_list = ["EWCS30065", "EWCS30156", "EWCS30154", "EWCS30143", "EWCS30144"]
+        device_list = ["EWCS30065",
+                       # "EWCS3A077",
+                       # "EWCA30143",
+                       "EWCA30192",
+                       "EWCA30196",
+                       "EWCA30197",
+                       # "EWCS30156",
+                       # "EWCS30154",
+                       # "EWCS30143",
+                       # "EWCS30144"
+                       ]
 
         client = MidoriMQTTClient(
             devices=device_list,

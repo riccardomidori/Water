@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12.11"
 dependencies = [
     "numpy>=2.3.5",
+    "paho-mqtt>=2.1.0",
     "polars>=1.35.2",
     "pyarrow>=22.0.0",
     "pymongo==3.11.3",
